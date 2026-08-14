@@ -1,0 +1,748 @@
+<script>
+/* ============================================================
+   Family - client application
+   Vanilla JS SPA. Talks to Apps Script backend via google.script.run.
+   ============================================================ */
+
+var root = document.getElementById('root');
+var state = {
+  user: null,
+  people: [],
+  route: 'dashboard',
+  params: {}
+};
+
+/* ---------------- google.script.run promise wrapper ---------------- */
+
+function call(fn) {
+  var args = Array.prototype.slice.call(arguments, 1);
+  return new Promise(function (resolve, reject) {
+    google.script.run
+      .withSuccessHandler(resolve)
+      .withFailureHandler(function (err) { reject(err); })[fn].apply(null, args);
+  });
+}
+
+function friendlyError(err) {
+  var msg = (err && err.message) ? err.message : String(err);
+  // Strip Apps Script's technical prefixes if any slipped through.
+  if (/^Exception:/.test(msg) || /at [A-Za-z]+\.gs/.test(msg)) {
+    return 'Something went wrong. Please try again.';
+  }
+  return msg;
+}
+
+/* ---------------- toast ---------------- */
+
+var toastEl = document.getElementById('toast');
+var toastTimer = null;
+function toast(message) {
+  toastEl.textContent = message;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 3200);
+}
+
+/* ---------------- formatting helpers ---------------- */
+
+function fmtDate(value) {
+  if (!value) return '\u2014';
+  var d = new Date(value);
+  if (isNaN(d.getTime())) return '\u2014';
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+function fmtSize(bytes) {
+  if (!bytes) return '';
+  var mb = bytes / (1024 * 1024);
+  if (mb >= 1) return mb.toFixed(1) + ' MB';
+  return Math.max(1, Math.round(bytes / 1024)) + ' KB';
+}
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function todayInputValue() {
+  var d = new Date();
+  var mm = String(d.getMonth() + 1).padStart(2, '0');
+  var dd = String(d.getDate()).padStart(2, '0');
+  return d.getFullYear() + '-' + mm + '-' + dd;
+}
+
+/* ---------------- routing ---------------- */
+
+function navigate(route, params) {
+  state.route = route;
+  state.params = params || {};
+  var hash = '#/' + route + (params && params.id ? '/' + params.id : '');
+  if (location.hash !== hash) location.hash = hash;
+  else render();
+}
+
+window.addEventListener('hashchange', function () {
+  var parts = location.hash.replace('#/', '').split('/');
+  state.route = parts[0] || 'dashboard';
+  state.params = parts[1] ? { id: parts[1] } : {};
+  render();
+});
+
+/* ---------------- boot ---------------- */
+
+function boot() {
+  if (!window.__INITIAL_AUTHORIZED__) {
+    renderLoginScreen();
+    return;
+  }
+  call('whoAmI').then(function (info) {
+    if (!info.authorized) { renderLoginScreen(); return; }
+    state.user = info;
+    var parts = location.hash.replace('#/', '').split('/');
+    state.route = parts[0] || 'dashboard';
+    state.params = parts[1] ? { id: parts[1] } : {};
+    render();
+  }).catch(function () { renderLoginScreen(); });
+}
+
+function renderLoginScreen() {
+  root.innerHTML =
+    '<div class="login-screen">' +
+      '<div class="brand">Family</div>' +
+      '<div class="tagline">Family health records</div>' +
+      '<div class="text-muted" style="font-size:14px; max-width:320px;">' +
+        'This account is not authorized to use this application. Ask an administrator to add your email.' +
+      '</div>' +
+      '<div class="footnote">Private family application</div>' +
+    '</div>';
+}
+
+/* ---------------- shell + nav ---------------- */
+
+var NAV_ITEMS = [
+  { route: 'dashboard', label: 'Dashboard' },
+  { route: 'people', label: 'People' },
+  { route: 'reports', label: 'Reports' },
+  { route: 'settings', label: 'Settings' }
+];
+
+function shellHtml(innerHtml) {
+  var navLinks = NAV_ITEMS.map(function (item) {
+    var active = (state.route === item.route) ? ' active' : '';
+    return '<a class="nav-link' + active + '" data-route="' + item.route + '">' + item.label + '</a>';
+  }).join('');
+
+  var mobileLinks = NAV_ITEMS.map(function (item) {
+    var active = (state.route === item.route) ? ' active' : '';
+    return '<a class="nav-link' + active + '" data-route="' + item.route + '">' + item.label + '</a>';
+  }).join('');
+
+  return (
+    '<div class="sidebar">' +
+      '<div class="brand">Family</div>' +
+      '<nav>' + navLinks + '</nav>' +
+    '</div>' +
+    '<div class="main">' +
+      '<div class="topbar">' +
+        '<div class="brand" style="font-size:17px;">Family</div>' +
+        '<span class="badge">' + esc(state.user.email) + '</span>' +
+      '</div>' +
+      '<div class="content" id="content">' + innerHtml + '</div>' +
+    '</div>' +
+    '<div class="mobile-nav">' + mobileLinks + '</div>'
+  );
+}
+
+function attachShellHandlers() {
+  document.querySelectorAll('[data-route]').forEach(function (el) {
+    el.addEventListener('click', function () {
+      navigate(el.getAttribute('data-route'));
+    });
+  });
+}
+
+/* ---------------- main render dispatch ---------------- */
+
+function render() {
+  if (!state.user) { boot(); return; }
+
+  var renderers = {
+    dashboard: renderDashboard,
+    people: renderPeopleList,
+    person: renderPersonDetail,
+    reports: renderReportsRedirect,
+    report: renderReportDetail,
+    upload: renderUpload,
+    'add-person': renderAddPerson,
+    settings: renderSettings,
+    'admin-users': renderAdminUsers
+  };
+
+  var fn = renderers[state.route] || renderDashboard;
+  root.innerHTML = shellHtml('<div class="text-muted">Loading\u2026</div>');
+  attachShellHandlers();
+  fn();
+}
+
+/* ---------------- DASHBOARD ---------------- */
+
+function renderDashboard() {
+  call('listPeople').then(function (people) {
+    state.people = people;
+    var content = document.getElementById('content');
+    if (!content) return;
+
+    var header =
+      '<div class="page-header">' +
+        '<div>' +
+          '<h1 class="page-title">Family</h1>' +
+          '<p class="page-subtitle">Your family\u2019s health records</p>' +
+        '</div>' +
+        '<button class="btn btn-primary" id="btn-upload">+ Upload Report</button>' +
+      '</div>';
+
+    var body;
+    if (people.length === 0) {
+      body = emptyStateHtml('No one added yet', 'Add a family member to start tracking their reports.', 'Add Person', 'add-person-btn');
+    } else {
+      body = '<div class="row-list">' + people.map(personRowHtml).join('') + '</div>';
+    }
+
+    content.innerHTML = header + body;
+    var uploadBtn = document.getElementById('btn-upload');
+    if (uploadBtn) uploadBtn.addEventListener('click', function () { navigate('upload'); });
+    var addBtn = document.getElementById('add-person-btn');
+    if (addBtn) addBtn.addEventListener('click', function () { navigate('add-person'); });
+    attachPersonRowHandlers();
+  }).catch(function (err) { showContentError(err); });
+}
+
+function personRowHtml(p) {
+  var reminderValue = p.remindersEnabled
+    ? (p.nextReminderDate ? fmtDate(p.nextReminderDate) : '\u2014')
+    : 'Off';
+  return (
+    '<button class="row" data-person="' + p.id + '">' +
+      '<div class="row-main">' +
+        '<div class="row-title">' + esc(p.name) + '</div>' +
+        '<div class="row-sub">' + p.reportCount + ' report' + (p.reportCount === 1 ? '' : 's') + '</div>' +
+      '</div>' +
+      '<div class="row-meta">' +
+        '<div class="meta-block"><div class="meta-label">Last test</div><div class="meta-value">' + fmtDate(p.lastTestDate) + '</div></div>' +
+        '<div class="meta-block"><div class="meta-label">Next reminder</div><div class="meta-value">' + esc(reminderValue) + '</div></div>' +
+      '</div>' +
+      '<div class="row-chevron">\u2192</div>' +
+    '</button>'
+  );
+}
+
+function attachPersonRowHandlers() {
+  document.querySelectorAll('[data-person]').forEach(function (el) {
+    el.addEventListener('click', function () {
+      navigate('person', { id: el.getAttribute('data-person') });
+    });
+  });
+}
+
+function emptyStateHtml(title, sub, actionLabel, actionId) {
+  return (
+    '<div class="empty-state">' +
+      '<div class="empty-title">' + esc(title) + '</div>' +
+      '<div class="empty-sub">' + esc(sub) + '</div>' +
+      (actionLabel ? '<button class="btn btn-primary" id="' + actionId + '">' + esc(actionLabel) + '</button>' : '') +
+    '</div>'
+  );
+}
+
+function showContentError(err) {
+  var content = document.getElementById('content');
+  if (content) {
+    content.innerHTML = '<div class="empty-state"><div class="empty-title">Something went wrong</div>' +
+      '<div class="empty-sub">' + esc(friendlyError(err)) + '</div></div>';
+  }
+}
+
+/* ---------------- PEOPLE LIST ---------------- */
+
+function renderPeopleList() {
+  call('listPeople').then(function (people) {
+    state.people = people;
+    var content = document.getElementById('content');
+    if (!content) return;
+
+    var header =
+      '<div class="page-header">' +
+        '<div><h1 class="page-title">People</h1></div>' +
+      '</div>';
+
+    var rows = people.map(function (p) {
+      return (
+        '<button class="row" data-person="' + p.id + '">' +
+          '<div class="row-main">' +
+            '<div class="row-title">' + esc(p.name) + '</div>' +
+            '<div class="row-sub">' + esc(p.email) + '</div>' +
+          '</div>' +
+          '<div class="row-chevron">\u2192</div>' +
+        '</button>'
+      );
+    }).join('');
+
+    content.innerHTML = header +
+      '<div class="row-list">' + rows + '</div>' +
+      '<div class="mt-24"><button class="btn btn-secondary" id="btn-add-person">+ Add Person</button></div>';
+
+    document.getElementById('btn-add-person').addEventListener('click', function () { navigate('add-person'); });
+    attachPersonRowHandlers();
+  }).catch(showContentError);
+}
+
+function renderReportsRedirect() {
+  navigate('people');
+}
+
+/* ---------------- ADD PERSON ---------------- */
+
+function renderAddPerson() {
+  var content = document.getElementById('content');
+  content.innerHTML =
+    '<h1 class="page-title">Add person</h1>' +
+    '<p class="page-subtitle">Add someone to the family records.</p>' +
+    '<label class="field-label">Name</label>' +
+    '<input id="f-name" type="text" placeholder="e.g. Grandpa">' +
+    '<label class="field-label">Email</label>' +
+    '<input id="f-email" type="email" placeholder="name@example.com">' +
+    '<div class="toggle-row mt-16">' +
+      '<span>Reminders enabled</span>' +
+      '<label class="switch"><input id="f-enabled" type="checkbox" checked><span class="track"></span></label>' +
+    '</div>' +
+    '<label class="field-label">Reminder interval (months)</label>' +
+    '<input id="f-interval" type="number" min="1" max="24" value="3">' +
+    '<div class="mt-24"><button class="btn btn-primary btn-block" id="btn-save">Add Person</button></div>';
+
+  document.getElementById('btn-save').addEventListener('click', function () {
+    var btn = this;
+    var input = {
+      name: document.getElementById('f-name').value,
+      email: document.getElementById('f-email').value,
+      remindersEnabled: document.getElementById('f-enabled').checked,
+      reminderIntervalMonths: document.getElementById('f-interval').value
+    };
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>';
+    call('addPerson', input).then(function () {
+      toast('Person added');
+      navigate('people');
+    }).catch(function (err) {
+      toast(friendlyError(err));
+      btn.disabled = false;
+      btn.textContent = 'Add Person';
+    });
+  });
+}
+
+/* ---------------- PERSON DETAIL ---------------- */
+
+function renderPersonDetail() {
+  var id = state.params.id;
+  Promise.all([call('getPerson', id), call('listReportsForPerson', id)])
+    .then(function (results) {
+      var p = results[0], reports = results[1];
+      var content = document.getElementById('content');
+      if (!content) return;
+
+      var latest = reports[0];
+      var reminderLine = p.remindersEnabled
+        ? (p.nextReminderDate ? fmtDate(p.nextReminderDate) : '\u2014')
+        : 'Off';
+
+      var header =
+        '<a class="text-muted" id="back-link" style="font-size:14px;">\u2190 People</a>' +
+        '<h1 class="page-title mt-8">' + esc(p.name) + '</h1>' +
+        '<p class="page-subtitle">' + esc(p.email) + '</p>';
+
+      var summary = '';
+      if (latest) {
+        summary =
+          '<div class="panel">' +
+            '<div class="row-meta">' +
+              '<div class="meta-block"><div class="meta-label">Latest report</div><div class="meta-value">' + fmtDate(latest.testDate) + '</div></div>' +
+              '<div class="meta-block"><div class="meta-label">Next reminder</div><div class="meta-value">' + esc(reminderLine) + '</div></div>' +
+            '</div>' +
+          '</div>';
+      }
+
+      var historyHeader = '<h2 class="section-title mt-24">Report history</h2>';
+      var historyBody;
+      if (reports.length === 0) {
+        historyBody = emptyStateHtml('No reports yet', 'Upload the first report for ' + p.name + '.', 'Upload Report', 'btn-upload-empty');
+      } else {
+        historyBody = '<div class="row-list">' + reports.map(reportRowHtml).join('') + '</div>';
+      }
+
+      var actions =
+        '<div class="mt-24" style="display:flex; gap:10px;">' +
+          '<button class="btn btn-primary" id="btn-upload-for">Upload Report</button>' +
+        '</div>';
+
+      content.innerHTML = header + summary + (reports.length ? actions : '') + historyHeader + historyBody;
+
+      document.getElementById('back-link').addEventListener('click', function () { navigate('people'); });
+      var uploadBtn = document.getElementById('btn-upload-for') || document.getElementById('btn-upload-empty');
+      if (uploadBtn) uploadBtn.addEventListener('click', function () { navigate('upload', { id: p.id }); });
+      attachReportRowHandlers();
+    }).catch(showContentError);
+}
+
+function reportRowHtml(r) {
+  return (
+    '<button class="row" data-report="' + r.id + '">' +
+      '<div class="row-main">' +
+        '<div class="row-title">' + fmtDate(r.testDate) + '</div>' +
+        '<div class="row-sub">' + esc(r.comment || 'Blood test') + '</div>' +
+      '</div>' +
+      '<div class="row-chevron">Open \u2192</div>' +
+    '</button>'
+  );
+}
+
+function attachReportRowHandlers() {
+  document.querySelectorAll('[data-report]').forEach(function (el) {
+    el.addEventListener('click', function () {
+      navigate('report', { id: el.getAttribute('data-report') });
+    });
+  });
+}
+
+/* ---------------- UPLOAD ---------------- */
+
+var uploadState = { file: null };
+
+function renderUpload() {
+  uploadState.file = null;
+  var presetPersonId = state.params.id || '';
+
+  call('listPeople').then(function (people) {
+    state.people = people;
+    var content = document.getElementById('content');
+    if (!content) return;
+
+    var options = people.map(function (p) {
+      var sel = String(p.id) === String(presetPersonId) ? ' selected' : '';
+      return '<option value="' + p.id + '"' + sel + '>' + esc(p.name) + '</option>';
+    }).join('');
+
+    content.innerHTML =
+      '<h1 class="page-title">Upload report</h1>' +
+      '<p class="page-subtitle">Add a new report to the family records.</p>' +
+      '<label class="field-label">Who is this report for?</label>' +
+      '<select id="f-person">' + options + '</select>' +
+      '<label class="field-label">Test date</label>' +
+      '<input id="f-date" type="date" value="' + todayInputValue() + '" max="' + todayInputValue() + '">' +
+      '<label class="field-label">Report</label>' +
+      '<div id="dropzone" class="dropzone">' +
+        '<div class="dz-main">Drop your report here</div>' +
+        '<div>or choose a file</div>' +
+        '<div class="mt-8" style="font-size:12px;">PDF, JPG or PNG</div>' +
+        '<input id="f-file" type="file" accept=".pdf,.jpg,.jpeg,.png" style="display:none;">' +
+      '</div>' +
+      '<div id="file-chip-wrap"></div>' +
+      '<label class="field-label">Comment</label>' +
+      '<textarea id="f-comment" rows="3" placeholder="Optional note..."></textarea>' +
+      '<div class="toggle-row mt-16">' +
+        '<span>Remind after ' + esc(defaultReminderMonthsForPerson_(presetPersonId, people)) + ' months</span>' +
+      '</div>' +
+      '<div class="mt-24"><button class="btn btn-primary btn-block" id="btn-upload-save">Upload Report</button></div>';
+
+    var dropzone = document.getElementById('dropzone');
+    var fileInput = document.getElementById('f-file');
+    dropzone.addEventListener('click', function () { fileInput.click(); });
+    dropzone.addEventListener('dragover', function (e) { e.preventDefault(); dropzone.classList.add('dragover'); });
+    dropzone.addEventListener('dragleave', function () { dropzone.classList.remove('dragover'); });
+    dropzone.addEventListener('drop', function (e) {
+      e.preventDefault();
+      dropzone.classList.remove('dragover');
+      if (e.dataTransfer.files && e.dataTransfer.files[0]) handleFileSelected(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener('change', function () {
+      if (fileInput.files && fileInput.files[0]) handleFileSelected(fileInput.files[0]);
+    });
+
+    document.getElementById('btn-upload-save').addEventListener('click', submitUpload);
+  }).catch(showContentError);
+}
+
+function defaultReminderMonthsForPerson_(personId, people) {
+  var p = people.filter(function (x) { return String(x.id) === String(personId); })[0];
+  return p ? p.reminderIntervalMonths : 3;
+}
+
+var ALLOWED_CLIENT_MIME = ['application/pdf', 'image/jpeg', 'image/png'];
+var MAX_CLIENT_MB = 15;
+
+function handleFileSelected(file) {
+  if (ALLOWED_CLIENT_MIME.indexOf(file.type) === -1) {
+    toast('Only PDF, JPG, or PNG files are allowed.');
+    return;
+  }
+  if (file.size > MAX_CLIENT_MB * 1024 * 1024) {
+    toast('That file is larger than ' + MAX_CLIENT_MB + ' MB.');
+    return;
+  }
+  uploadState.file = file;
+  var wrap = document.getElementById('file-chip-wrap');
+  wrap.innerHTML =
+    '<div class="file-chip mt-8">' +
+      '<div><div class="fc-name">' + esc(file.name) + '</div><div class="fc-size">' + fmtSize(file.size) + '</div></div>' +
+      '<button class="btn-danger" id="btn-remove-file">Remove</button>' +
+    '</div>';
+  document.getElementById('btn-remove-file').addEventListener('click', function () {
+    uploadState.file = null;
+    wrap.innerHTML = '';
+  });
+}
+
+function submitUpload() {
+  if (!uploadState.file) { toast('Choose a report file first.'); return; }
+  var personId = document.getElementById('f-person').value;
+  var testDate = document.getElementById('f-date').value;
+  var comment = document.getElementById('f-comment').value;
+
+  var btn = document.getElementById('btn-upload-save');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Uploading\u2026';
+
+  var reader = new FileReader();
+  reader.onload = function () {
+    var base64 = reader.result.split(',')[1];
+    call('uploadReport', {
+      personId: personId,
+      testDate: testDate,
+      comment: comment,
+      file: {
+        base64: base64,
+        mimeType: uploadState.file.type,
+        filename: uploadState.file.name,
+        sizeBytes: uploadState.file.size
+      }
+    }).then(function (person) {
+      renderUploadSuccess(person);
+    }).catch(function (err) {
+      toast(friendlyError(err));
+      btn.disabled = false;
+      btn.textContent = 'Upload Report';
+    });
+  };
+  reader.onerror = function () {
+    toast('Could not read that file. Please try again.');
+    btn.disabled = false;
+    btn.textContent = 'Upload Report';
+  };
+  reader.readAsDataURL(uploadState.file);
+}
+
+function renderUploadSuccess(person) {
+  var content = document.getElementById('content');
+  content.innerHTML =
+    '<div class="empty-state">' +
+      '<div class="empty-title">Report uploaded</div>' +
+      '<div class="empty-sub">' + esc(person.name) + '\u2019s report was saved successfully.</div>' +
+      (person.nextReminderDate ?
+        '<div class="panel" style="display:inline-block; text-align:left;">' +
+          '<div class="meta-label">Next reminder</div>' +
+          '<div class="meta-value mt-8">' + fmtDate(person.nextReminderDate) + '</div>' +
+        '</div>' : '') +
+      '<div class="mt-24"><button class="btn btn-primary" id="btn-done">Done</button></div>' +
+    '</div>';
+  document.getElementById('btn-done').addEventListener('click', function () {
+    navigate('person', { id: person.id });
+  });
+}
+
+/* ---------------- REPORT DETAIL ---------------- */
+
+function renderReportDetail() {
+  var id = state.params.id;
+  call('getReport', id).then(function (r) {
+    var content = document.getElementById('content');
+    if (!content) return;
+
+    content.innerHTML =
+      '<a class="text-muted" id="back-link" style="font-size:14px;">\u2190 ' + esc(r.personName) + '</a>' +
+      '<h1 class="page-title mt-8">Blood Test</h1>' +
+      '<p class="page-subtitle">' + esc(r.personName) + ' \u00b7 ' + fmtDate(r.testDate) + '</p>' +
+      '<label class="field-label">Comment</label>' +
+      '<div>' + esc(r.comment || '\u2014') + '</div>' +
+      '<label class="field-label">File</label>' +
+      '<div>' + esc(r.filename) + (r.sizeBytes ? ' \u00b7 ' + fmtSize(r.sizeBytes) : '') + '</div>' +
+      '<div class="mt-24" style="display:flex; gap:10px; flex-wrap:wrap;">' +
+        '<button class="btn btn-primary" id="btn-open">Open Report</button>' +
+        '<button class="btn btn-secondary" id="btn-download">Download</button>' +
+        (state.user.isAdmin ? '<button class="btn btn-secondary btn-danger" id="btn-delete">Delete</button>' : '') +
+      '</div>';
+
+    document.getElementById('back-link').addEventListener('click', function () { navigate('person', { id: r.personId }); });
+    document.getElementById('btn-open').addEventListener('click', function () { openReportFile(id, false); });
+    document.getElementById('btn-download').addEventListener('click', function () { openReportFile(id, true); });
+    var delBtn = document.getElementById('btn-delete');
+    if (delBtn) delBtn.addEventListener('click', function () { confirmDeleteReport(id, r.personId); });
+  }).catch(showContentError);
+}
+
+function openReportFile(reportId, forceDownload) {
+  toast('Preparing file\u2026');
+  call('getReportFile', reportId).then(function (f) {
+    var byteChars = atob(f.base64);
+    var byteNumbers = new Array(byteChars.length);
+    for (var i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
+    var blob = new Blob([new Uint8Array(byteNumbers)], { type: f.mimeType });
+    var url = URL.createObjectURL(blob);
+    if (forceDownload) {
+      var a = document.createElement('a');
+      a.href = url; a.download = f.filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    } else {
+      window.open(url, '_blank');
+    }
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+  }).catch(function (err) { toast(friendlyError(err)); });
+}
+
+function confirmDeleteReport(reportId, personId) {
+  showConfirmModal('Delete this report?', 'This removes it from the records. The original file stays safely in Drive.', function () {
+    call('deleteReport', reportId).then(function () {
+      toast('Report deleted');
+      navigate('person', { id: personId });
+    }).catch(function (err) { toast(friendlyError(err)); });
+  });
+}
+
+/* ---------------- SETTINGS ---------------- */
+
+function renderSettings() {
+  var content = document.getElementById('content');
+  content.innerHTML =
+    '<h1 class="page-title">Settings</h1>' +
+    '<h2 class="section-title mt-24">Account</h2>' +
+    '<p class="text-muted">Signed in as<br>' + esc(state.user.email) + '</p>' +
+    '<h2 class="section-title mt-24">Application</h2>' +
+    '<p class="text-muted">Family Health Records</p>' +
+    (state.user.isAdmin ?
+      '<h2 class="section-title mt-24">Administration</h2>' +
+      '<button class="btn btn-secondary" id="btn-manage-users">Authorized users \u2192</button>' +
+      '<h2 class="section-title mt-24">Storage</h2>' +
+      '<p class="text-muted">Google Drive \u00b7 Connected</p>' +
+      '<div class="mt-24" style="display:flex; gap:10px;">' +
+        '<button class="btn btn-secondary" id="btn-export">Export Data</button>' +
+        '<button class="btn btn-secondary" id="btn-backup">Backup Files</button>' +
+      '</div>'
+      : '');
+
+  var manageBtn = document.getElementById('btn-manage-users');
+  if (manageBtn) manageBtn.addEventListener('click', function () { navigate('admin-users'); });
+
+  var exportBtn = document.getElementById('btn-export');
+  if (exportBtn) exportBtn.addEventListener('click', function () {
+    exportBtn.innerHTML = '<span class="spinner"></span>';
+    call('exportData').then(function (data) {
+      var blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = 'family-health-records-export.json';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      exportBtn.textContent = 'Export Data';
+      toast('Export downloaded');
+    }).catch(function (err) { toast(friendlyError(err)); exportBtn.textContent = 'Export Data'; });
+  });
+
+  var backupBtn = document.getElementById('btn-backup');
+  if (backupBtn) backupBtn.addEventListener('click', function () {
+    backupBtn.innerHTML = '<span class="spinner"></span>';
+    call('backupAllReportFiles').then(function (res) {
+      toast('Backup complete (' + res.filesProcessed + ' files checked)');
+      backupBtn.textContent = 'Backup Files';
+    }).catch(function (err) { toast(friendlyError(err)); backupBtn.textContent = 'Backup Files'; });
+  });
+}
+
+/* ---------------- ADMIN: USERS ---------------- */
+
+function renderAdminUsers() {
+  if (!state.user.isAdmin) { navigate('settings'); return; }
+  call('listUsers').then(function (users) {
+    var content = document.getElementById('content');
+    if (!content) return;
+
+    var rows = users.map(function (u) {
+      var roleBadge = u.role === 'ADMIN' ? '<span class="badge badge-admin">Admin</span>' : '<span class="badge">Family</span>';
+      var toggleLabel = u.enabled ? 'Disable' : 'Enable';
+      return (
+        '<div class="row">' +
+          '<div class="row-main">' +
+            '<div class="row-title">' + esc(u.email) + '</div>' +
+            '<div class="row-sub">' + roleBadge + (u.enabled ? '' : ' \u00b7 disabled') + '</div>' +
+          '</div>' +
+          '<div style="display:flex; gap:8px;">' +
+            '<button class="btn btn-secondary" data-toggle-user="' + esc(u.email) + '" data-enabled="' + u.enabled + '">' + toggleLabel + '</button>' +
+          '</div>' +
+        '</div>'
+      );
+    }).join('');
+
+    content.innerHTML =
+      '<a class="text-muted" id="back-link" style="font-size:14px;">\u2190 Settings</a>' +
+      '<h1 class="page-title mt-8">Authorized users</h1>' +
+      '<div class="row-list">' + rows + '</div>' +
+      '<h2 class="section-title mt-24">Add user</h2>' +
+      '<label class="field-label">Email</label>' +
+      '<input id="f-new-email" type="email" placeholder="name@example.com">' +
+      '<label class="field-label">Role</label>' +
+      '<select id="f-new-role"><option value="FAMILY">Family</option><option value="ADMIN">Admin</option></select>' +
+      '<div class="mt-24"><button class="btn btn-primary" id="btn-add-user">Add User</button></div>';
+
+    document.getElementById('back-link').addEventListener('click', function () { navigate('settings'); });
+    document.getElementById('btn-add-user').addEventListener('click', function () {
+      var email = document.getElementById('f-new-email').value;
+      var role = document.getElementById('f-new-role').value;
+      call('addUser', email, role).then(function () {
+        toast('User added');
+        renderAdminUsers();
+      }).catch(function (err) { toast(friendlyError(err)); });
+    });
+    document.querySelectorAll('[data-toggle-user]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var email = btn.getAttribute('data-toggle-user');
+        var currentlyEnabled = btn.getAttribute('data-enabled') === 'true';
+        call('setUserEnabled', email, !currentlyEnabled).then(function () {
+          renderAdminUsers();
+        }).catch(function (err) { toast(friendlyError(err)); });
+      });
+    });
+  }).catch(showContentError);
+}
+
+/* ---------------- confirm modal ---------------- */
+
+function showConfirmModal(title, body, onConfirm) {
+  var wrap = document.createElement('div');
+  wrap.className = 'modal-backdrop';
+  wrap.innerHTML =
+    '<div class="modal">' +
+      '<h2 class="section-title">' + esc(title) + '</h2>' +
+      '<p class="text-muted mt-8">' + esc(body) + '</p>' +
+      '<div class="mt-24" style="display:flex; gap:10px; justify-content:flex-end;">' +
+        '<button class="btn btn-secondary" id="modal-cancel">Cancel</button>' +
+        '<button class="btn btn-primary" id="modal-confirm">Confirm</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(wrap);
+  wrap.querySelector('#modal-cancel').addEventListener('click', function () { document.body.removeChild(wrap); });
+  wrap.querySelector('#modal-confirm').addEventListener('click', function () {
+    document.body.removeChild(wrap);
+    onConfirm();
+  });
+}
+
+/* ---------------- go ---------------- */
+
+boot();
+</script>

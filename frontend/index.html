@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= include('styles'); ?>
+</head>
+<body>
+  <div id="root"></div>
+  <div id="toast"></div>
+
+  <script>
+    // Server tells us up front whether the signed-in Google account is on
+    // the allowlist, so we don't even attempt data calls if not.
+    window.__INITIAL_AUTHORIZED__ = <?!= authorized ? 'true' : 'false' ?>;
+  </script>
+
+  <?!= include('app'); ?>
+</body>
+</html>
