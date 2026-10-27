@@ -1,0 +1,21 @@
+# Google Apps Script local artifacts (if any)
+.gas/
+.clasp.json
+.claspignore
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
